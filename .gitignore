@@ -32,3 +32,5 @@ KMS
 # GitHub CLI
 .github/personal-instructions.md
 dispatches.json
+schedule.json
+schedule.json.lock

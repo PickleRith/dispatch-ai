@@ -4,15 +4,17 @@ One job: figure out how urgent the problem is, keep the caller safe, and book
 the right technician. Run with AGENT_PROFILE=mine in .env.local.
 """
 
+import asyncio
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 
 from livekit import rtc
 from livekit.agents import Agent, RunContext, function_tool, get_job_context
 from livekit.agents.beta.tools import EndCallTool
 
+import dispatch_schedule
 from prompts import build_instructions
 
 logger = logging.getLogger("dispatch-agent")
@@ -36,11 +38,20 @@ book a technician.
    For the callback number: if assess_urgency told you the number they are calling
    from, ask whether that number is good to reach them, and only ask for a
    different number if it is not. If you were not told a number, ask for one.
+   Take the address in pieces: ask them to say the house number one digit at a
+   time, then the street, then the unit and city if needed. If you are unsure of
+   a street name, ask them to spell it. Read the whole address back with the
+   house number one digit at a time, for example two three two eight Winston
+   Street, and ask if that is right. If they correct you, use their digits and
+   read it back again. Never guess a digit. Only move on after they say yes.
 4. For an emergency, read back the address and say you are sending the nearest
    technician now, in one sentence, and ask if that is right. For urgent or
    routine problems, call check_availability and offer at most two times, then
    read back the address and the chosen time in one sentence and ask if that is
    right.
+   Quote the wait the tools give you: say about, rounded to five minutes, and
+   never promise a precise arrival time. If the wait is long, repeat any safety
+   step that is still open.
 5. Only after they say yes, call book_technician.
 6. Tell them the technician's name and when they will arrive, remind them of any
    safety step still open, ask if there is anything else, then say goodbye and
@@ -63,28 +74,12 @@ personal details. If the caller insists it is an emergency but describes a slow
 drip, be kind, but set the urgency by what they actually describe.
 """
 
-# Demo data. Swap for a real schedule if you have time.
-TECHNICIANS = [
-    {"name": "Mike Torres", "eta_minutes": 35},
-    {"name": "Sarah Kim", "eta_minutes": 50},
-]
-
 SAFETY_STEPS = {
     "water": "If water is still running, shut off the main water valve now. It is usually near the water meter or where the pipe enters the house. In an apartment, or if you can't find it, ask the building super to shut it off.",
     "electric": "Stay away from any water near outlets or the electrical panel, and do not touch switches.",
     "gas": "Leave the building right now and call nine one one or the gas company from outside.",
     "sewage": "Keep everyone, especially children and pets, away from the sewage water.",
 }
-
-
-def _open_slots() -> dict[str, list[str]]:
-    """Open appointment times for the next three days, keyed by ISO date."""
-    slots: dict[str, list[str]] = {}
-    day = date.today()
-    while len(slots) < 3:
-        day += timedelta(days=1)
-        slots[day.isoformat()] = ["9:00 AM", "1:00 PM", "4:00 PM"]
-    return slots
 
 
 def _caller_number() -> str | None:
@@ -108,7 +103,6 @@ class MyAgent(Agent):
             instructions=build_instructions(JOB_PROMPT),
             tools=[EndCallTool(ignore_on_enter=True)],
         )
-        self.calendar = _open_slots()
         self.urgency: str | None = None
         self.caller_phone: str | None = None
         self.issue: str | None = None
@@ -160,10 +154,26 @@ class MyAgent(Agent):
                 + " Once they are safe outside, offer to book the plumber."
                 + hint
             )
+        wait = ""
+        if level == "emergency":
+            # Schedule file I/O can wait on another call's lock; keep the event loop free.
+            try:
+                est = await asyncio.to_thread(dispatch_schedule.estimate_emergency)
+            except dispatch_schedule.ScheduleBusyError:
+                logger.warning("schedule busy, no wait estimate")
+            else:
+                wait = f" Current estimated wait for a technician: about {est['wait_minutes']} minutes."
+                if est["all_busy"]:
+                    wait += " Both technicians are on other jobs right now, so tell the caller that plainly."
         steps = [SAFETY_STEPS[h] for h in hazards if h in SAFETY_STEPS]
         if steps:
-            return "Say these safety steps to the caller now: " + " ".join(steps) + hint
-        return f"Urgency recorded as {level}. Continue with the caller's details.{hint}"
+            return (
+                "Say these safety steps to the caller now: "
+                + " ".join(steps)
+                + wait
+                + hint
+            )
+        return f"Urgency recorded as {level}. Continue with the caller's details.{wait}{hint}"
 
     @function_tool
     async def check_availability(self, context: RunContext, day: str = "") -> str:
@@ -177,12 +187,13 @@ class MyAgent(Agent):
                 empty to get the earliest openings.
         """
         logger.info("check_availability day=%s", day)
+        calendar = await asyncio.to_thread(dispatch_schedule.all_slots)
         if not day:
-            day = next((d for d, times in self.calendar.items() if times), "")
-        open_slots = self.calendar.get(day)
+            day = next((d for d, times in calendar.items() if times), "")
+        open_slots = calendar.get(day)
         if not open_slots:
-            options = ", ".join(list(self.calendar))
-            return f"No openings on {day}. Days with openings: {options}."
+            options = ", ".join(d for d, times in calendar.items() if times)
+            return f"No openings on {day}. Days with openings: {options or 'none'}."
         weekday = date.fromisoformat(day).strftime("%A")
         # Hand back two times at most, so the caller only has to choose between two.
         offer = " or ".join(open_slots[:2])
@@ -215,15 +226,25 @@ class MyAgent(Agent):
         phone = phone or self.caller_phone or ""
         if not phone:
             return "No callback number yet. Ask the caller for one."
-        if self.urgency == "emergency":
-            tech = min(TECHNICIANS, key=lambda t: t["eta_minutes"])
-            when = f"on the way now, about {tech['eta_minutes']} minutes out"
-            who = tech["name"]
-        else:
-            if time not in self.calendar.get(day, []):
-                return "That time is not open. Check availability again."
-            self.calendar[day].remove(time)
-            who, when = "Ana Ruiz", f"{day} at {time}"
+        wait_minutes: int | None = None
+        jobs_ahead = 0
+        try:
+            if self.urgency == "emergency":
+                slot = await asyncio.to_thread(
+                    dispatch_schedule.reserve_emergency, name
+                )
+                who, wait_minutes = slot["technician"], slot["wait_minutes"]
+                jobs_ahead = slot["jobs_ahead"]
+                when = f"on the way, about {wait_minutes} minutes out"
+            else:
+                if not await asyncio.to_thread(
+                    dispatch_schedule.reserve_slot, day, time
+                ):
+                    return "That time was just taken. Check availability again."
+                who, when = dispatch_schedule.ROUTINE_TECHNICIAN, f"{day} at {time}"
+        except dispatch_schedule.ScheduleBusyError:
+            logger.warning("schedule busy, booking not made")
+            return "The schedule is busy for a moment. Tell the caller you are still booking, then call book_technician again."
 
         record = {
             "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -234,12 +255,25 @@ class MyAgent(Agent):
             "urgency": self.urgency,
             "technician": who,
             "when": when,
+            "wait_minutes": wait_minutes,
+            "queued": jobs_ahead > 0,
         }
         records = json.loads(DISPATCH_LOG.read_text()) if DISPATCH_LOG.exists() else []
         records.append(record)
         DISPATCH_LOG.write_text(json.dumps(records, indent=2))
         logger.info("DISPATCH CREATED: %s", record)
+        if wait_minutes is None:
+            return (
+                f"Booked {who}, {when}. Tell the caller the technician's name and "
+                "when they will arrive, then wrap up."
+            )
+        queue = (
+            f" {who} has {jobs_ahead} job{'s' if jobs_ahead > 1 else ''} to finish first."
+            if jobs_ahead
+            else ""
+        )
         return (
-            f"Booked {who}, {when}. Tell the caller the technician's name and "
-            "when they will arrive, then wrap up."
+            f"Booked {who}, about {wait_minutes} minutes away.{queue} Tell the caller "
+            "the actual wait, even if it is longer than you said before, and the "
+            "technician's name, then wrap up."
         )

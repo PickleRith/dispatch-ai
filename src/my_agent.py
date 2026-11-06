@@ -14,6 +14,7 @@ from livekit import rtc
 from livekit.agents import Agent, RunContext, function_tool, get_job_context
 from livekit.agents.beta.tools import EndCallTool
 
+import caller_memory
 import dispatch_schedule
 from prompts import build_instructions
 
@@ -44,6 +45,10 @@ book a technician.
    house number one digit at a time, for example two three two eight Winston
    Street, and ask if that is right. If they correct you, use their digits and
    read it back again. Never guess a digit. Only move on after they say yes.
+   If assess_urgency says this is a returning caller, greet them by first name and
+   ask whether it is the same address as last time, having them say the house
+   number first. Never read a saved name or address before they do, and let them
+   change the address, the problem or anything else.
 4. For an emergency, read back the address and say you are sending the nearest
    technician now, in one sentence, and ask if that is right. For urgent or
    routine problems, call check_availability and offer at most two times, then
@@ -146,6 +151,7 @@ class MyAgent(Agent):
                 "When you need a callback number, ask if that number is good, "
                 "and leave phone empty when booking if they say yes."
             )
+            hint += await self._returning_caller_hint()
         if "gas" in hazards:
             # Gas overrides everything: never send someone to a valve in a gassy house.
             return (
@@ -174,6 +180,28 @@ class MyAgent(Agent):
                 + hint
             )
         return f"Urgency recorded as {level}. Continue with the caller's details.{wait}{hint}"
+
+    async def _returning_caller_hint(self) -> str:
+        """Tool-result line for a caller ID that booked before, or ""."""
+        if not caller_memory.enabled():
+            return ""
+        try:
+            saved = await asyncio.to_thread(caller_memory.lookup, self.caller_phone)
+        except Exception:
+            # Memory is a nicety; never let it break the call.
+            logger.warning("caller memory lookup failed", exc_info=True)
+            return ""
+        if not saved:
+            return ""
+        return (
+            f" Returning caller: first name {saved['first_name']}, called before. "
+            "Greet them by first name. Do not say the saved address or full name. "
+            "Ask whether this is about the same address as last time, and ask them "
+            "to say the house number first. Only if their house number matches the "
+            "saved one, use the saved street and unit, and still read the full "
+            "address back digit by digit and get a yes. "
+            f"Saved address, only for comparing: {saved['address']}."
+        )
 
     @function_tool
     async def check_availability(self, context: RunContext, day: str = "") -> str:
@@ -262,6 +290,20 @@ class MyAgent(Agent):
         records.append(record)
         DISPATCH_LOG.write_text(json.dumps(records, indent=2))
         logger.info("DISPATCH CREATED: %s", record)
+        # Remember the caller under their caller ID (the lookup key), never under a
+        # number they typed in. A memory failure must not undo a booking.
+        if caller_memory.enabled() and self.caller_phone:
+            try:
+                await asyncio.to_thread(
+                    caller_memory.save_booking,
+                    self.caller_phone,
+                    name,
+                    address,
+                    self.issue,
+                    self.urgency,
+                )
+            except Exception:
+                logger.warning("caller memory save failed", exc_info=True)
         if wait_minutes is None:
             return (
                 f"Booked {who}, {when}. Tell the caller the technician's name and "

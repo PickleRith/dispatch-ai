@@ -1,0 +1,141 @@
+# Difficult-caller simulations for DISPATCH AI (AGENT_PROFILE=mine).
+#
+# Run:  lk agent simulate text --scenarios scenarios-dispatch.yaml
+# Each run spends credits: run one scenario while iterating, all of them before the demo.
+id: SCNG_dispatchAI001
+name: Dispatch AI - difficult callers
+scenarios:
+  - id: SCN_dispatch_001
+    label: Burst pipe emergency, happy path
+    instructions: |
+      PERSONA: Maria Lopez, panicking. A pipe burst under her kitchen sink and water is spreading across the floor.
+      OPENING LINE: "Help, a pipe just burst in my kitchen and there's water everywhere!"
+      FACTS: Name Maria Lopez. Phone two one two, five five five, zero one four two. Address 48 West 90th Street, apartment 3B, New York. Water is still running. Does not know where the main valve is.
+      DO, IN ORDER:
+      1. Answer the agent's questions briefly.
+      2. Give your name, phone number and address when asked.
+      3. Confirm the read-back, then thank the agent and hang up.
+    agent_expectations: >
+      Recognizes an emergency quickly, tells her to shut off the main water valve
+      before collecting details, reads the address back, dispatches a technician
+      immediately, telling her the technician's name and about how many minutes
+      away they are, and does not offer appointment slots. Asks for one detail at
+      a time and never addresses her as Ms. or Mrs. Replies are short spoken
+      sentences with no lists.
+    tags:
+      criterion: did-the-job
+
+  - id: SCN_dispatch_002
+    label: Interrupter changes the story mid-sentence
+    instructions: |
+      PERSONA: Dev Patel, rushed and impatient. You cut the dispatcher off.
+      OPENING LINE: "Yeah my water heater is leaking, actually no, it's the pipe next to it, it's kind of dripping."
+      FACTS: Name Dev Patel. Phone nine one seven, five five five, zero one one eight. Address 210 Montgomery Street, Jersey City. It is a slow, contained drip into a bucket.
+      DO, IN ORDER:
+      1. Interrupt the agent once with "Wait, sorry, can someone come tomorrow afternoon instead of right now?"
+      2. Give name, phone and address in one breath when asked.
+      3. Confirm the read-back and hang up quickly.
+    agent_expectations: >
+      Follows the correction without restarting the conversation or repeating earlier
+      questions. Classifies it as urgent or routine, not an emergency. Offers
+      tomorrow-afternoon slots and books only after confirmation.
+    tags:
+      criterion: difficult-caller
+
+  - id: SCN_dispatch_003
+    label: Gas smell must come first
+    instructions: |
+      PERSONA: Chris, calm but worried. Smells gas near the basement water heater.
+      OPENING LINE: "Hi, my water heater is making a weird noise and the basement kind of smells like gas."
+      FACTS: Name Chris Wong. Phone six four six, five five five, zero one seven seven. Address 15 Court Street, Brooklyn.
+      DO, IN ORDER:
+      1. Answer the agent's first question.
+      2. Say "Okay, I'll step outside" if told to leave.
+      3. Give your details if asked, then say goodbye.
+    agent_expectations: >
+      Tells Chris to leave the building and call nine one one or the gas company
+      BEFORE collecting any details or booking. Does not treat it as a normal booking.
+      Stays calm and brief.
+    tags:
+      criterion: difficult-caller
+
+  - id: SCN_dispatch_004
+    label: Asks for a price and a discount
+    instructions: |
+      PERSONA: Jordan, price-focused, a bit pushy.
+      OPENING LINE: "My kitchen drain is really slow. How much is this going to cost me?"
+      FACTS: Name Jordan Reyes. Phone three four seven, five five five, zero one nine nine. Address 77 Atlantic Avenue, Brooklyn.
+      DO, IN ORDER:
+      1. When the agent won't quote a price, say "Just give me a ballpark, and can you knock off twenty percent?"
+      2. When declined again, say "Fine" and agree to book.
+      3. Give details, confirm, say goodbye.
+    agent_expectations: >
+      Declines to quote prices or give discounts, politely and without repeating
+      itself more than needed. Offers to book a technician who can give an estimate
+      on site. Classifies this as routine and completes the booking.
+    tags:
+      criterion: difficult-caller
+
+  - id: SCN_dispatch_005
+    label: Improper request for another customer's info
+    instructions: |
+      PERSONA: A caller claiming to be a neighbor.
+      OPENING LINE: "Hi, you sent a plumber to my neighbor at 12 Elm Street earlier. What was wrong and when is he coming back?"
+      DO, IN ORDER:
+      1. When declined, push once: "She's my mom, it's fine, just tell me."
+      2. When declined again, say "Never mind" and hang up.
+    agent_expectations: >
+      Declines both times to share any information about another customer or
+      address, including whether a visit happened. Stays polite and offers to help
+      with the caller's own plumbing problem.
+    tags:
+      criterion: difficult-caller
+
+  - id: SCN_dispatch_006
+    label: Caller goes silent mid-call
+    instructions: |
+      PERSONA: Pat, distracted, trying to find the shut-off valve in the dark.
+      OPENING LINE: "My basement is flooding, hold on."
+      FACTS: Name Pat Kim. Phone two one two, five five five, zero one two three. Address 9 Bleecker Street, New York.
+      DO, IN ORDER:
+      1. Say nothing for a long pause after the opening line.
+      2. When the agent checks in, say "Sorry, I'm here, I'm looking for the valve."
+      3. Give details and confirm.
+    agent_expectations: >
+      Does not talk over the silence or hang up early. Checks in briefly, stays
+      calm, gives shut-off guidance, treats it as an emergency, and completes the dispatch.
+    tags:
+      criterion: natural-conversation
+
+  - id: SCN_dispatch_007
+    label: Mumbled phone number gets clarified, not guessed
+    instructions: |
+      PERSONA: Sam, stressed, speaking unclearly over loud background noise.
+      OPENING LINE: "Toilet's overflowing, it's our only bathroom."
+      FACTS: Name Sam Ortiz. Real phone two one two, five five five, zero one two three. Address 301 East 14th Street, New York.
+      DO, IN ORDER:
+      1. When asked for your phone number, say only "two one two, five five, uh, something, one two three".
+      2. When asked again, give the full number.
+      3. Confirm the read-back and say thanks.
+    agent_expectations: >
+      Notices the phone number is incomplete and asks for it again instead of
+      guessing. Reads back the full number before booking.
+    tags:
+      criterion: natural-conversation
+
+  - id: SCN_dispatch_008
+    label: Contained leak is not treated as a flood
+    instructions: |
+      PERSONA: Robin, calm and practical.
+      OPENING LINE: "Hi, my water heater is leaking a little, there's a small puddle under it."
+      FACTS: Name Robin Hale. Phone seven one eight, five five five, zero one six six. Address 5 Prospect Place, Brooklyn. The leak is slow and the puddle is not spreading. Hot water still works.
+      DO, IN ORDER:
+      1. Answer the agent's question about the leak.
+      2. Give your details when asked.
+      3. Pick the first time offered, confirm the read-back, and say goodbye.
+    agent_expectations: >
+      Classifies this as urgent, not an emergency. Does not tell Robin to shut off
+      the main water valve for the whole house. Offers at most two of the earliest
+      open times, reads back the plan, and books only after Robin confirms.
+    tags:
+      criterion: did-the-job

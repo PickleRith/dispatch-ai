@@ -9,7 +9,8 @@ import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from livekit.agents import Agent, RunContext, function_tool
+from livekit import rtc
+from livekit.agents import Agent, RunContext, function_tool, get_job_context
 from livekit.agents.beta.tools import EndCallTool
 
 from prompts import build_instructions
@@ -32,6 +33,9 @@ book a technician.
    safety steps, say them right away, before anything else.
 3. Ask for their full name, then their callback number, then the address, one
    question per turn. Call them by first name, never Mr., Ms. or Mrs.
+   For the callback number: if assess_urgency told you the number they are calling
+   from, ask whether that number is good to reach them, and only ask for a
+   different number if it is not. If you were not told a number, ask for one.
 4. For an emergency, read back the address and say you are sending the nearest
    technician now, in one sentence, and ask if that is right. For urgent or
    routine problems, call check_availability and offer at most two times, then
@@ -83,6 +87,21 @@ def _open_slots() -> dict[str, list[str]]:
     return slots
 
 
+def _caller_number() -> str | None:
+    """Caller ID digits from the SIP call, or None (console, withheld number)."""
+    ctx = get_job_context(required=False)
+    if ctx is None:
+        return None
+    for person in ctx.room.remote_participants.values():
+        if person.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+            raw = person.attributes.get("sip.phoneNumber", "")
+            digits = "".join(c for c in raw if c.isdigit())
+            if len(digits) == 11 and digits.startswith("1"):
+                digits = digits[1:]
+            return digits or None
+    return None
+
+
 class MyAgent(Agent):
     def __init__(self) -> None:
         super().__init__(
@@ -91,6 +110,7 @@ class MyAgent(Agent):
         )
         self.calendar = _open_slots()
         self.urgency: str | None = None
+        self.caller_phone: str | None = None
         self.issue: str | None = None
 
     async def on_enter(self) -> None:
@@ -123,17 +143,27 @@ class MyAgent(Agent):
         if level not in ("emergency", "urgent", "routine"):
             return 'level must be "emergency", "urgent" or "routine". Call again.'
         self.urgency, self.issue = level, issue_summary
+        self.caller_phone = _caller_number()
+        hint = ""
+        if self.caller_phone:
+            last4 = " ".join(self.caller_phone[-4:])
+            hint = (
+                f" Caller ID: they are calling from a number ending in {last4}. "
+                "When you need a callback number, ask if that number is good, "
+                "and leave phone empty when booking if they say yes."
+            )
         if "gas" in hazards:
             # Gas overrides everything: never send someone to a valve in a gassy house.
             return (
                 "If the caller is not already outside, say only this, then wait: "
                 + SAFETY_STEPS["gas"]
                 + " Once they are safe outside, offer to book the plumber."
+                + hint
             )
         steps = [SAFETY_STEPS[h] for h in hazards if h in SAFETY_STEPS]
         if steps:
-            return "Say these safety steps to the caller now: " + " ".join(steps)
-        return f"Urgency recorded as {level}. Continue with the caller's details."
+            return "Say these safety steps to the caller now: " + " ".join(steps) + hint
+        return f"Urgency recorded as {level}. Continue with the caller's details.{hint}"
 
     @function_tool
     async def check_availability(self, context: RunContext, day: str = "") -> str:
@@ -163,8 +193,8 @@ class MyAgent(Agent):
         self,
         context: RunContext,
         name: str,
-        phone: str,
         address: str,
+        phone: str = "",
         day: str = "",
         time: str = "",
     ) -> str:
@@ -174,7 +204,7 @@ class MyAgent(Agent):
 
         Args:
             name: Caller's full name.
-            phone: Callback number, digits only.
+            phone: Callback number, digits only. Leave empty ONLY if the caller agreed to use the number they are calling from.
             address: The confirmed service address.
             day: ISO date (YYYY-MM-DD) for urgent or routine jobs. Empty for emergencies.
             time: One of the open times, e.g. "1:00 PM". Empty for emergencies.
@@ -182,6 +212,9 @@ class MyAgent(Agent):
         logger.info("book_technician %s %s", name, address)
         if self.urgency is None:
             return "Urgency is not set yet. Call assess_urgency first."
+        phone = phone or self.caller_phone or ""
+        if not phone:
+            return "No callback number yet. Ask the caller for one."
         if self.urgency == "emergency":
             tech = min(TECHNICIANS, key=lambda t: t["eta_minutes"])
             when = f"on the way now, about {tech['eta_minutes']} minutes out"

@@ -18,6 +18,8 @@ from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
+    ChatMessage,
+    ConversationItemAddedEvent,
     JobContext,
     STTContextOptions,
     TurnHandlingOptions,
@@ -89,7 +91,29 @@ def handle_silence(session: AgentSession) -> None:
             task.add_done_callback(tasks.discard)
 
 
-server = AgentServer()
+def log_latency(session: AgentSession) -> None:
+    """Log how long each reply took, so model and setting changes can be compared."""
+
+    @session.on("conversation_item_added")
+    def _on_item(ev: ConversationItemAddedEvent) -> None:
+        item = ev.item
+        if not isinstance(item, ChatMessage):
+            return
+        m = item.metrics
+        if item.role == "user" and "end_of_turn_delay" in m:
+            logger.info("latency user: end_of_turn=%.2fs", m["end_of_turn_delay"])
+        elif item.role == "assistant" and "e2e_latency" in m:
+            logger.info(
+                "latency reply: total=%.2fs llm_ttft=%.2fs tts_ttfb=%.2fs",
+                m["e2e_latency"],
+                m.get("llm_node_ttft", -1.0),
+                m.get("tts_node_ttfb", -1.0),
+            )
+
+
+# Keep one process loaded and waiting, so the first call after a restart is
+# answered right away. Dev mode defaults to 0, which made callers say "hello?".
+server = AgentServer(num_idle_processes=1)
 
 
 @server.rtc_session(agent_name=AGENT_NAME)
@@ -102,7 +126,18 @@ async def entrypoint(ctx: JobContext) -> None:
         stt=models.stt,
         # Bias transcription toward words it would otherwise misspell.
         stt_context_options=STTContextOptions(
-            keyterms=["Take2", "LiveKit"],
+            keyterms=[
+                "Metro Rapid Plumbing",
+                "Astoria",
+                "Brooklyn",
+                "Queens",
+                "Bronx",
+                "Manhattan",
+                "Staten Island",
+                "Jersey City",
+                "shut-off valve",
+                "water heater",
+            ],
             keyterm_detection={"enabled": True},
         ),
         # Brain: the LLM
@@ -114,6 +149,11 @@ async def entrypoint(ctx: JobContext) -> None:
             # Decides when the caller has finished speaking, using both the words
             # and the audio (pitch, pauses). Much better than a fixed silence timer.
             turn_detection=inference.TurnDetector(),
+            # How long to wait after the caller stops before replying.
+            # min 0.6s: the default 0.3s cut callers off mid-thought on test calls.
+            # max 1.8s: used when the turn detector is unsure; 3.0s made those
+            # replies take ~3.4s. Dynamic mode learns each caller's pace in between.
+            endpointing={"mode": "dynamic", "min_delay": 0.6, "max_delay": 1.8},
             # Start drafting a reply before the turn is confirmed. Cuts latency.
             preemptive_generation={"enabled": True},
         ),
@@ -121,6 +161,7 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     handle_silence(session)
+    log_latency(session)
 
     async def log_usage() -> None:
         # Shows model usage per call so you can see what you're spending.
